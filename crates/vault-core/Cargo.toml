@@ -24,7 +24,8 @@ zeroize = "1"
 
 # 本地存储：自研单文件 NoSQL（文档模型 + redb 纯 Rust ACID 底座）。
 # 选型见 docs/Taolun.md TL20261025T191400 与存储决策讨论：可审计、文档模型天然匹配、单文件即备份。
-nodblite = { path = "../../../nosqlite" }
+# 上游：github.com/Titor-Z/nosqlite（包名 nodblite）；rev 钉死当前同步的上游 commit。
+nodblite = { git = "https://github.com/Titor-Z/nosqlite", rev = "8f851eaadcf978c0a25f9097f3cd2a9d70cbdeee" }
 # 条目与 KDF 参数的 JSON 序列化（加密前的明文形态规范化）
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
