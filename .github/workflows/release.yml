@@ -10,6 +10,8 @@
 #   passpoart.0.4.4.linux-x64  / passpoart.0.4.4.linux-arm64
 #
 # 发布说明取自根目录 CHANGELOG 的当前版本段落（CHANGELOG 只留最新一版）。
+# 传输方式：不经过 Actions 制品（artifact 配额另算且易满）——guard 建草稿
+# Release，各平台构建完直接把二进制传上去，publish 统一转正并标记 latest。
 
 name: Release
 
@@ -28,7 +30,7 @@ permissions:
 
 jobs:
   guard:
-    name: 校验最新 tag 并备发布说明
+    name: 校验最新 tag 并建草稿 Release
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.decide.outputs.version }}
@@ -40,6 +42,7 @@ jobs:
       - id: decide
         env:
           TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -69,11 +72,22 @@ jobs:
           ' CHANGELOG > release-notes.md
           sed -i '/./,$!d' release-notes.md # 去掉段首空行
           echo "proceed=true" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - name: 建草稿 Release（已存在则复用，保证可重跑）
         if: steps.decide.outputs.proceed == 'true'
-        with:
-          name: release-notes
-          path: release-notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，复用"
+          else
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --draft \
+              --title "$TAG" \
+              --notes-file release-notes.md
+          fi
 
   build:
     name: 构建 ${{ matrix.suffix }}
@@ -106,6 +120,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.guard.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -125,8 +141,10 @@ jobs:
             libvulkan-dev
       - name: 构建（release · vault-app）
         run: cargo build --release --target ${{ matrix.target }} -p vault-app
-      - name: 整理产物并命名（macOS 做 ad-hoc 签名）
+      - name: 命名（macOS ad-hoc 签名）并直传草稿 Release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           bin="target/${{ matrix.target }}/release/passpoart${{ matrix.ext }}"
           out="passpoart.${VERSION}.${{ matrix.suffix }}${{ matrix.ext }}"
@@ -135,34 +153,33 @@ jobs:
             codesign --force --sign - "$out" # ad-hoc：本地可跑，未经公证仍需手动放行
           fi
           ls -l "$out"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: passpoart-${{ matrix.suffix }}
-          path: passpoart.${{ needs.guard.outputs.version }}.${{ matrix.suffix }}${{ matrix.ext }}
+          gh release upload "$TAG" "$out" --clobber --repo "$REPO"
 
-  release:
-    name: 发布 GitHub Release
+  publish:
+    name: 转正 Release 并标记 latest
     needs: [guard, build]
     if: needs.guard.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          pattern: passpoart-*
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          path: notes
-          pattern: release-notes
-          merge-multiple: true
-      - name: 创建 Release（tag 名即标题，CHANGELOG 段落即说明）
+      - name: 校验五平台产物齐全后转正
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
-          ls -l dist
-          gh release create "$TAG" dist/passpoart.* \
-            --title "$TAG" \
-            --notes-file notes/release-notes.md \
-            --latest
+          expected="passpoart.${TAG#v}.macos-arm64 passpoart.${TAG#v}.macos-x64 passpoart.${TAG#v}.windows-x64.exe passpoart.${TAG#v}.linux-x64 passpoart.${TAG#v}.linux-arm64"
+          assets="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')"
+          missing=0
+          for name in $expected; do
+            if ! grep -qx "$name" <<<"$assets"; then
+              echo "::error::缺少产物 $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::产物不齐，Release 保持草稿"
+            exit 1
+          fi
+          gh release edit "$TAG" --repo "$REPO" --draft=false --latest
+          echo "已发布 $TAG（latest）"
