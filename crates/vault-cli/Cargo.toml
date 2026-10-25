@@ -1,0 +1,13 @@
+[package]
+name = "vault-cli"
+version.workspace = true
+edition.workspace = true
+description = "Passpoart 命令行：库闭环与红队自测（init/verify/add/list/get/remove/lock/redteam）。"
+
+[[bin]]
+name = "vault-cli"
+path = "src/main.rs"
+
+[dependencies]
+# 只依赖核心库：CLI 不引 gpui，保持编译快、攻击面小。
+vault-core = { workspace = true }

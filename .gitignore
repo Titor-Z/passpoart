@@ -1,0 +1,14 @@
+# 协作规范文件：禁止上传 GitHub（需云端备份时先加密）
+AGENTS.md
+docs/
+
+# Rust
+/target
+Cargo.lock
+
+# macOS
+.DS_Store
+
+# 日志与本地环境
+*.log
+.env

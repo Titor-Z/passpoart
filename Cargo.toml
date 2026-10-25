@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vault-core",
+    "crates/vault-app",
+    "crates/vault-ui",
+    "crates/vault-cli",
+]
+
+[workspace.package]
+version = "0.4.4"
+edition = "2021"
+
+[workspace.dependencies]
+vault-ui = { path = "crates/vault-ui" }
+# 内部 crate（版本随 workspace 走，改版本只改这一处）
+vault-core = { path = "crates/vault-core" }

@@ -1,0 +1,168 @@
+# Passpoart 发布流水线
+#
+# 触发纪律：只有推送 `v*` tag 才运行；普通提交一律不触发。
+# 多 tag 同推：只发布其中最新（版本号最大）的那个；同一时间只允许一个
+# Release 运行，新 run 启动会立即取消还在跑的旧 run（concurrency + guard 双保险）。
+#
+# 产物命名：passpoart.<版本号>.<平台后缀>[.exe]
+#   passpoart.0.4.4.macos-arm64 / passpoart.0.4.4.macos-x64
+#   passpoart.0.4.4.windows-x64.exe
+#   passpoart.0.4.4.linux-x64  / passpoart.0.4.4.linux-arm64
+#
+# 发布说明取自根目录 CHANGELOG 的当前版本段落（CHANGELOG 只留最新一版）。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 任何新的 Release run 都会顶掉运行中的旧 run（多 tag 同推 / 旧版还在跑时立即停止）
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  guard:
+    name: 校验最新 tag 并备发布说明
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+      proceed: ${{ steps.decide.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 需要完整 tag 列表
+      - id: decide
+        env:
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # 只放行版本号最大的 tag：旧 tag 的 run 在这里就地止步
+          latest_tag="$(git tag -l 'v*' --sort=-v:refname | sed -n '1p')"
+          if [ "$TAG" != "$latest_tag" ]; then
+            echo "当前 tag $TAG 不是最新版本（最新 $latest_tag），跳过发布"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # tag 与 workspace 版本必须一致，防止忘改版本号
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
+          if [ "$cargo_version" != "$version" ]; then
+            echo "::error::tag $TAG 与 Cargo.toml 版本 $cargo_version 不一致"
+            exit 1
+          fi
+
+          # 发布说明 = CHANGELOG 里当前版本那一节
+          awk -v hdr="## v${version}" '
+            index($0, hdr) == 1 { on = 1; next }
+            /^## v/ { on = 0 }
+            on { print }
+          ' CHANGELOG > release-notes.md
+          sed -i '/./,$!d' release-notes.md # 去掉段首空行
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: steps.decide.outputs.proceed == 'true'
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  build:
+    name: 构建 ${{ matrix.suffix }}
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
+    strategy:
+      fail-fast: false # 单平台失败不连坐，其余平台照常出包
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: macos-arm64
+            ext: ''
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            suffix: macos-x64
+            ext: ''
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-x64
+            ext: '.exe'
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-x64
+            ext: ''
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            suffix: linux-arm64
+            ext: ''
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: 安装 Linux 系统依赖（wayland/x11/xkb/字体/udev/vulkan）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libfontconfig1-dev libudev-dev libx11-dev libxext-dev \
+            libxrandr-dev libxi-dev libxcursor-dev libxfixes-dev \
+            libvulkan-dev
+      - name: 构建（release · vault-app）
+        run: cargo build --release --target ${{ matrix.target }} -p vault-app
+      - name: 整理产物并命名（macOS 做 ad-hoc 签名）
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/passpoart${{ matrix.ext }}"
+          out="passpoart.${VERSION}.${{ matrix.suffix }}${{ matrix.ext }}"
+          cp "$bin" "$out"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            codesign --force --sign - "$out" # ad-hoc：本地可跑，未经公证仍需手动放行
+          fi
+          ls -l "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: passpoart-${{ matrix.suffix }}
+          path: passpoart.${{ needs.guard.outputs.version }}.${{ matrix.suffix }}${{ matrix.ext }}
+
+  release:
+    name: 发布 GitHub Release
+    needs: [guard, build]
+    if: needs.guard.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: passpoart-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: notes
+          pattern: release-notes
+          merge-multiple: true
+      - name: 创建 Release（tag 名即标题，CHANGELOG 段落即说明）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          gh release create "$TAG" dist/passpoart.* \
+            --title "$TAG" \
+            --notes-file notes/release-notes.md \
+            --latest
