@@ -62,6 +62,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_pw_reveal_secs() -> u64 {
+    20
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct AppConfig {
     /// true = 关闭按钮最小化窗口；false/缺省 = 直接退出。
@@ -73,6 +77,9 @@ struct AppConfig {
     /// 复制密码后 30 秒自动清空剪贴板；缺省开。
     #[serde(default = "default_true")]
     clip_autoclear: bool,
+    /// 点眼睛明文显示密码后自动掩码的秒数；0 = 常亮。缺省 20。
+    #[serde(default = "default_pw_reveal_secs")]
+    pw_reveal_secs: u64,
 }
 
 /// 配置文件路径（与默认库同目录 ~/.passpoart/）。
@@ -86,10 +93,14 @@ pub struct AppRoot {
     screen: Screen,
     dark: bool,
     filter: Filter,
-    /// 当前选中条目（列表态高亮 + 详情态内容）。
-    selected: usize,
+    /// 当前选中条目（列表态高亮 + 详情态内容）；`None` = 未选中。
+    selected: Option<usize>,
     /// 详情态里「复制密码」是否已点（按钮切换为已复制反馈）。
     copied: bool,
+    /// 详情底部状态栏消息：`(是否成功, 文案)`，1.8s 自动消失。复制 / 打开网址都走这里。
+    status: Option<(bool, SharedString)>,
+    /// 状态代号防误清：新状态代号 +1，旧 timer 醒来发现代号变了就不清。
+    status_gen: u64,
     // —— 真实解锁（TDdf7f1ac7）——
     /// 库文件路径：PASSPOART_DB 环境变量 > ~/.passpoart/vault.nodb。
     db_path: PathBuf,
@@ -103,6 +114,10 @@ pub struct AppRoot {
     clip_gen: u64,
     /// 眼睛按钮：圆点/明文切换。
     show_pw: bool,
+    /// 点眼睛明文显示后自动掩码秒数（0=常亮），来自设置。
+    pw_reveal_secs: u64,
+    /// 明文自动掩码代号：新一次明文显示使代号 +1，旧定时器醒来发现代号变了就不动（防误遮）。
+    pw_reveal_gen: u64,
     /// Argon2id 派生进行中（按钮转「派生中」，防重入）。
     unlocking: bool,
     /// 解锁失败/引导提示（输入框下红字）。
@@ -559,19 +574,23 @@ impl AppRoot {
                 close_minimizes: false,
                 autolock_minutes: default_autolock_minutes(),
                 clip_autoclear: true,
+                pw_reveal_secs: default_pw_reveal_secs(),
             });
         let root = Self {
             screen: Screen::Unlock,
             dark: false,
             filter: Filter::All,
-            selected: 0,
+            selected: None,
             copied: false,
+            status: None,
+            status_gen: 0,
             db_path,
             vault_exists,
             password: Self::new_password_input(cx),
             search_input: Self::new_search_input(cx),
             clip_gen: 0,
             show_pw: false,
+            pw_reveal_gen: 0,
             unlocking: false,
             unlock_error: None,
             opened: None,
@@ -585,6 +604,7 @@ impl AppRoot {
             close_minimizes: config.close_minimizes,
             autolock_minutes: config.autolock_minutes,
             clip_autoclear: config.clip_autoclear,
+            pw_reveal_secs: config.pw_reveal_secs,
             caret_on: true,
         };
         root.start_clock(cx);
@@ -601,7 +621,7 @@ impl AppRoot {
                 if this
                     .update(cx, |this, cx| {
                         this.caret_on = !this.caret_on; // 输入光标闪烁
-                        // 自动锁定：解锁后的三屏 10 分钟无操作即清密钥回解锁屏
+                        // 自动锁定：解锁后的三屏，无操作达配置分钟数即清密钥回解锁屏
                         let autolock_after =
                             std::time::Duration::from_secs(this.autolock_minutes * 60);
                         if this.last_activity.elapsed() >= autolock_after
@@ -631,6 +651,7 @@ impl AppRoot {
             close_minimizes: self.close_minimizes,
             autolock_minutes: self.autolock_minutes,
             clip_autoclear: self.clip_autoclear,
+            pw_reveal_secs: self.pw_reveal_secs,
         };
         let path = config_path();
         if let Some(parent) = path.parent() {
@@ -684,7 +705,7 @@ pub fn open(cx: &mut App) {
     };
     let _ = cx.open_window(options, |window, cx| {
         crate::platform::hide_system_window_buttons(window);
-        let root = cx.new(|cx| AppRoot::new(cx));
+        let root = cx.new(AppRoot::new);
         // 开窗即聚焦主密码框：直接可打字
         let focus = root.read(cx).password.read(cx).focus_handle();
         window.focus(&focus, cx);
@@ -714,7 +735,6 @@ impl Render for AppRoot {
             .flex_col()
             .w(px(theme::WINDOW_W))
             .h(px(theme::WINDOW_H))
-            .rounded(px(theme::WINDOW_RADIUS))
             .overflow_hidden()
             .bg(t.window_bg)
             .child(content)
@@ -727,8 +747,7 @@ impl Render for AppRoot {
                     .w(px(theme::WINDOW_W))
                     .h(px(theme::WINDOW_H))
                     .border_1()
-                    .border_color(t.border)
-                    .rounded(px(theme::WINDOW_RADIUS)),
+                    .border_color(t.border),
             )
     }
 }
@@ -951,35 +970,6 @@ fn field_row(
         row = row.child(tools);
     }
     row
-}
-
-/// 字段行尾部的小图标按钮组。
-fn field_tools(t: &Theme, icons: &[&'static str]) -> Div {
-    div().flex().flex_row().items_center().gap(px(2.0)).children(
-        icons
-            .iter()
-            .map(|ic| icon_plain_ic(ElementId::Name(SharedString::from(*ic)), *ic, t.muted)),
-    )
-}
-
-/// field_tools 的单图标版（id 要唯一，这里用图标名）。
-fn icon_plain_ic(id: ElementId, path: &'static str, ink: gpui::Rgba) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(px(25.0))
-        .h(px(25.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(7.0))
-        .cursor_pointer()
-        .child(
-            gpui::svg()
-                .path(path)
-                .w(px(13.0))
-                .h(px(13.0))
-                .text_color(ink),
-        )
 }
 
 // ================================================================ 解锁屏
@@ -1356,7 +1346,10 @@ impl AppRoot {
                         div()
                             .text_size(px(11.0))
                             .text_color(t.text_2)
-                            .child("检测到 10 分钟无操作，密码库已自动锁定"),
+                            .child(SharedString::from(format!(
+                                "检测到 {} 分钟无操作，密码库已自动锁定",
+                                self.autolock_minutes
+                            ))),
                     )
             }))
             .child(body)
@@ -1440,7 +1433,7 @@ impl AppRoot {
                         });
                         this.show_pw = false;
                         this.search_input.update(cx, |i, cx| i.clear(cx));
-                        this.selected = 0;
+                        this.selected = None;
                         this.filter = Filter::All;
                         match this.reload_items() {
                             Ok(()) => this.screen = Screen::List,
@@ -1577,7 +1570,7 @@ impl AppRoot {
     /// 删除当前选中条目（墓碑），回列表。
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
         self.touch();
-        let Some(view) = self.items.get(self.selected) else { return };
+        let Some(view) = self.selected.and_then(|i| self.items.get(i)) else { return };
         let id = view.id.clone();
         let result = (|| -> Result<(), String> {
             let opened = self.opened.as_mut().ok_or("库未打开")?;
@@ -1597,7 +1590,7 @@ impl AppRoot {
             } else {
                 self.screen = Screen::List;
             }
-            self.selected = 0;
+            self.selected = None;
         }
         self.confirm_delete = false;
         cx.notify();
@@ -1606,17 +1599,15 @@ impl AppRoot {
     /// 收藏切换：重封 + 刷新后把选中钉回同一条（更新时间排序会挪位）。
     fn toggle_favorite(&mut self, cx: &mut Context<Self>) {
         self.touch();
-        let Some(view) = self.items.get(self.selected) else { return };
+        let Some(view) = self.selected.and_then(|i| self.items.get(i)) else { return };
         let id = view.id.clone();
-        if self.reseal_item(&id, |it| it.favorite = !it.favorite).is_ok() {
-            if self.reload_items().is_ok() {
+        if self.reseal_item(&id, |it| it.favorite = !it.favorite).is_ok()
+            && self.reload_items().is_ok() {
                 self.selected = self
                     .items
                     .iter()
-                    .position(|it| it.id == id)
-                    .unwrap_or(0);
+                    .position(|it| it.id == id);
             }
-        }
         cx.notify();
     }
 
@@ -1653,7 +1644,7 @@ impl AppRoot {
     /// 打开编辑表单：从库解密权威原文回填（版本 = 旧版 + 1）。
     fn open_edit_existing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.touch();
-        let Some(view) = self.items.get(self.selected) else { return };
+        let Some(view) = self.selected.and_then(|i| self.items.get(i)) else { return };
         let id = view.id.clone();
         let Some(opened) = self.opened.as_ref() else { return };
         let Some(vault) = opened.vault.as_ref() else { return };
@@ -1749,30 +1740,42 @@ impl AppRoot {
         // 搜索输入框组件（前置图标 + 后置清除 / Ctrl F）
         let search = self.search_input.clone();
 
-        // 过滤 chips：计数取自真实解密快照。
+        // 过滤 chips：计数取自真实解密快照。色相按分类走，不再一刷红。
+        // 字段序：(filter, name, count, dot, accent, soft, border_active, border_idle)
+        type ChipSpec = (
+            Filter, &'static str, Option<u32>,
+            Option<gpui::Rgba>, gpui::Rgba, gpui::Rgba, gpui::Rgba, gpui::Rgba,
+        );
         let favorite_count = self.items.iter().filter(|i| i.starred).count() as u32;
-        let chips: Vec<(Filter, &'static str, Option<u32>, Option<gpui::Rgba>)> = vec![
-            (Filter::All, "全部", Some(self.items.len() as u32), None),
-            (Filter::Favorite, "收藏", Some(favorite_count), None),
-            (Filter::Kind(Kind::Login), "登录", None, Some(t.primary)),
-            (Filter::Kind(Kind::Note), "笔记", None, Some(t.mint)),
-            (Filter::Kind(Kind::Card), "银行卡", None, Some(t.peach)),
-            (Filter::Kind(Kind::Identity), "身份", None, Some(t.lavender)),
+        let chips: Vec<ChipSpec> = vec![
+            (Filter::All, "全部", Some(self.items.len() as u32),
+                None, t.primary, t.primary_soft, rgba(0xE4739D_59), rgba(0xE4739D_4D)),
+            (Filter::Favorite, "收藏", Some(favorite_count),
+                None, t.primary, t.primary_soft, rgba(0xE4739D_59), rgba(0xE4739D_4D)),
+            (Filter::Kind(Kind::Login), "登录", None,
+                Some(t.primary), t.primary, t.primary_soft, rgba(0xE4739D_59), rgba(0xE4739D_4D)),
+            (Filter::Kind(Kind::Note), "笔记", None,
+                Some(t.mint), t.mint, t.mint_soft, rgba(0x58B98C_59), rgba(0x58B98C_4D)),
+            (Filter::Kind(Kind::Card), "银行卡", None,
+                Some(t.peach), t.peach, t.peach_soft, rgba(0xE9945F_59), rgba(0xE9945F_4D)),
+            (Filter::Kind(Kind::Identity), "身份", None,
+                Some(t.lavender), t.lavender, t.lavender_soft, rgba(0x9B7FDF_59), rgba(0x9B7FDF_4D)),
         ];
         let chip_row = div()
             .mt(px(8.0))
             .flex()
             .flex_row()
             .gap(px(6.0))
-            .children(chips.iter().enumerate().map(|(i, (f, name, cnt, dot))| {
+            .children(chips.iter().enumerate().map(|(i, (f, name, cnt, dot, accent, soft, b_active, b_idle))| {
                 let active = *f == self.filter;
                 // listener 要求 'static：先把 Copy 的 Filter 解引用成值再捕获。
                 let picked = *f;
-                let (bg, ink, border) = if active {
-                    // 画板 chip.on：主色 35% 描边 + 凸影
-                    (t.primary_soft, t.primary_strong, rgba(0xE4739D_59))
+                let (bg, _ink, border) = if active {
+                    // 选中：同色相低透背景 + 35% 描边 + 凸影
+                    (*soft, *accent, *b_active)
                 } else {
-                    (t.card, t.text_2, t.border_soft)
+                    // 默认：画板 card (warm white 60% / dark 黑紫 55%) + 30% 描边
+                    (t.card, *accent, *b_idle)
                 };
                 div()
                     .id(ElementId::Name(SharedString::from(format!("chip-{i}"))))
@@ -1796,7 +1799,7 @@ impl AppRoot {
                         div()
                             .text_size(px(11.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(ink)
+                            .text_color(t.muted)
                             .child(*name),
                     )
                     .children(cnt.map(|n| {
@@ -1840,7 +1843,7 @@ impl AppRoot {
                     .into_iter()
                     .map(|i| {
                 let item = &self.items[i];
-                let selected = i == self.selected;
+                let selected = self.selected == Some(i);
                 let hover = t.hover;
                 let row = div()
                     .id(ElementId::Name(SharedString::from(format!("item-{i}"))))
@@ -1857,7 +1860,8 @@ impl AppRoot {
                     .bg(if selected {
                         t.primary_soft
                     } else {
-                        rgba(0x000000_00)
+                        // 默认行：画板 card（亮色 warm white 60% / 暗色黑紫 55%），叠在窗底上是设计稿浅粉白画板该看到的质感
+                        t.card
                     })
                     // 画板 item.sel：选中行凸影
                     .when(selected, |s| s.shadow(vec![t.sh_raised.clone()]))
@@ -1921,8 +1925,9 @@ impl AppRoot {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.touch();
-                    this.selected = i;
+                    this.selected = Some(i);
                     this.copied = false;
+                    this.show_pw = false;
                     this.screen = Screen::Detail;
                     cx.notify();
                 }))
@@ -1956,8 +1961,51 @@ impl AppRoot {
 // ================================================================ 详情态
 
 impl AppRoot {
+    /// 打开条目网址：补 https:// 前缀后交系统默认浏览器；空网址静默跳过。
+    fn open_item_url(&mut self, cx: &mut Context<Self>) {
+        self.touch();
+        let Some(sel) = self.selected else { return };
+        let raw = self.items[sel].url.trim().to_string();
+        if raw.is_empty() {
+            self.set_status(false, "该条目没有网址", cx);
+            return;
+        }
+        let url = if raw.starts_with("http://") || raw.starts_with("https://") {
+            raw
+        } else {
+            format!("https://{raw}")
+        };
+        cx.open_url(&url);
+        self.set_status(true, "已在浏览器打开", cx);
+    }
+
+    /// 设置底部状态栏消息：`(成功?, 文案)`，1.8s 后自动恢复默认提示。代号防误清：
+    /// 中途又设了新状态，旧 timer 醒来发现代号不一致就不动新内容。
+    fn set_status(&mut self, ok: bool, msg: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.status = Some((ok, msg.into()));
+        self.status_gen += 1;
+        let gen = self.status_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1800))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.status_gen == gen {
+                    this.status = None;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn detail_view(&self, t: &Theme, cx: &Context<Self>) -> Div {
-        let item = &self.items[self.selected];
+        let Some(sel) = self.selected else {
+            // 不可达：Detail 仅从已选行进入；兑底返空 div。
+            return div();
+        };
+        let item = &self.items[sel];
         let (kbg, kink) = kind_colors(t, item.kind);
 
         let titlebar = div()
@@ -2064,9 +2112,19 @@ impl AppRoot {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.touch();
                 // 真实写入系统剪贴板；30 秒后自动清空（代号防误清：期间又复制了就不动）
-                let secret = this.items[this.selected].secret.clone();
+                let Some(sel) = this.selected else { return };
+                let secret = this.items[sel].secret.clone();
+                if secret.is_empty() {
+                    this.set_status(false, "该条目没有可复制内容", cx);
+                    return;
+                }
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(secret));
                 this.copied = true;
+                if this.clip_autoclear {
+                    this.set_status(true, "已复制 · 30s 清空", cx);
+                } else {
+                    this.set_status(true, "已复制", cx);
+                }
                 if this.clip_autoclear {
                 this.clip_gen += 1;
                 let gen = this.clip_gen;
@@ -2162,6 +2220,41 @@ impl AppRoot {
             None => div().text_size(px(12.0)).text_color(t.muted).child("未配置"),
         };
 
+        // 字段值复制按钮：真实写剪贴板 + 底部状态栏反馈；hover / 按下都有底色反馈。
+        let totp_code = item
+            .totp_seed
+            .as_ref()
+            .and_then(|seed| vault_core::totp::totp_code(seed, vault_core::storage::now_secs()))
+            .unwrap_or_default();
+        let copy_ic = |id: &'static str, text: String, label: &'static str| {
+            div()
+                .id(id)
+                .w(px(25.0))
+                .h(px(25.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.0))
+                .cursor_pointer()
+                .hover(move |s| s.bg(t.hover))
+                .active(move |s| s.bg(t.hover))
+                .child(
+                    gpui::svg()
+                        .path("icons/copy.svg")
+                        .w(px(13.0))
+                        .h(px(13.0))
+                        .text_color(t.muted),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if text.is_empty() {
+                        this.set_status(false, format!("该条目没有{label}"), cx);
+                        return;
+                    }
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                    this.set_status(true, format!("已复制{label}"), cx);
+                }))
+        };
+
         let fields = div()
             .mt(px(12.0))
             .flex()
@@ -2174,7 +2267,7 @@ impl AppRoot {
                     .text_size(px(12.0))
                     .text_color(t.text)
                     .child(item.sub.clone()),
-                Some(field_tools(t, &["icons/copy.svg"])),
+                Some(copy_ic("copy-user", item.sub.clone(), "用户名")),
             ))
             .child(field_row(
                 t,
@@ -2182,7 +2275,11 @@ impl AppRoot {
                 div()
                     .text_size(px(13.0))
                     .text_color(t.text)
-                    .child("••••••••••••••"),
+                    .child(if self.show_pw {
+                        SharedString::from(item.secret.clone())
+                    } else {
+                        SharedString::from("••••••••••••••")
+                    }),
                 Some(
                     div()
                         .flex()
@@ -2190,23 +2287,107 @@ impl AppRoot {
                         .items_center()
                         .gap(px(8.0))
                         .child(strength_bar(t, item.strength))
-                        .child(field_tools(t, &["icons/eye.svg", "icons/copy.svg"])),
+                        .child(
+                            div()
+                                .id("reveal-eye")
+                                .w(px(25.0))
+                                .h(px(25.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(7.0))
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(t.hover))
+                                .child(
+                                    gpui::svg()
+                                        .path("icons/eye.svg")
+                                        .w(px(13.0))
+                                        .h(px(13.0))
+                                        .text_color(if self.show_pw { t.primary } else { t.muted }),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.touch();
+                                    this.show_pw = !this.show_pw;
+                                    if this.show_pw {
+                                        // 切到明文：有设定时长则起自动掩码倒计时（代号防误遮）
+                                        if this.pw_reveal_secs > 0 {
+                                            let secs = this.pw_reveal_secs;
+                                            this.pw_reveal_gen += 1;
+                                            let gen = this.pw_reveal_gen;
+                                            cx.spawn(async move |this, cx| {
+                                                cx.background_executor()
+                                                    .timer(std::time::Duration::from_secs(secs))
+                                                    .await;
+                                                let _ = this.update(cx, |this, cx| {
+                                                    if this.pw_reveal_gen == gen && this.show_pw {
+                                                        this.show_pw = false;
+                                                    }
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .detach();
+                                        }
+                                    } else {
+                                        // 手动切回掩码：递增代号让在途定时器作废
+                                        this.pw_reveal_gen += 1;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(copy_ic("copy-pw", item.secret.clone(), "密码")),
                 ),
             ))
             .child(field_row(
                 t,
                 "网址",
-                div()
-                    .text_size(px(12.0))
-                    .text_color(t.sky)
-                    .child(if item.url.is_empty() {
-                        SharedString::from("—")
-                    } else {
-                        SharedString::from(item.url.clone())
-                    }),
-                Some(field_tools(t, &["icons/link.svg"])),
+                if item.url.is_empty() {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(t.sky)
+                        .child(SharedString::from("—"))
+                        .into_any_element()
+                } else {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(t.sky)
+                        .child(SharedString::from(item.url.clone()))
+                        .into_any_element()
+                },
+                Some(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(2.0))
+                        .child(copy_ic("copy-url", item.url.clone(), "网址"))
+                        .child(
+                            div()
+                                .id("btn-open-url")
+                                .w(px(25.0))
+                                .h(px(25.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(7.0))
+                                .cursor_pointer()
+                                .hover(move |s| s.bg(t.hover))
+                                .child(
+                                    gpui::svg()
+                                        .path("icons/link.svg")
+                                        .w(px(13.0))
+                                        .h(px(13.0))
+                                        .text_color(t.muted),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.open_item_url(cx))),
+                        ),
+                ),
             ))
-            .child(field_row(t, "验证码", totp_value, Some(field_tools(t, &["icons/copy.svg"]))))
+            .child(field_row(
+                t,
+                "验证码",
+                totp_value,
+                Some(copy_ic("copy-totp", totp_code.clone(), "验证码")),
+            ))
             .child(field_row(
                 t,
                 "备注",
@@ -2322,7 +2503,9 @@ impl AppRoot {
                     .child(ghost_btn("btn-edit", "icons/pencil.svg", "编辑").on_click(
                         cx.listener(|this, _, window, cx| this.open_edit_existing(window, cx)),
                     ))
-                    .child(ghost_btn("btn-open", "icons/link.svg", "打开网址"))
+                    .child(ghost_btn("btn-open", "icons/link.svg", "打开网址").on_click(
+                        cx.listener(|this, _, _, cx| this.open_item_url(cx)),
+                    ))
                     // 删除：二次确认（首击变红字，再击才执行；Esc 撤销）
                     .child({
                         let confirming = self.confirm_delete;
@@ -2434,12 +2617,19 @@ impl AppRoot {
                         item.version,
                     )),
             )
-            .child(
-                div()
+            .child(match &self.status {
+                Some((ok, msg)) => div()
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if *ok { t.success } else { t.danger })
+                    .child(msg.clone())
+                    .into_any_element(),
+                None => div()
                     .text_size(px(10.0))
                     .text_color(t.muted)
-                    .child("复制后 30 秒清空剪贴板"),
-            );
+                    .child("复制后 30 秒清空剪贴板")
+                    .into_any_element(),
+            });
 
         div()
             .flex()
@@ -2822,7 +3012,7 @@ impl AppRoot {
                 .spawn(async move {
                     let mk = derive_master_key(&pw, &salt, params)
                         .map_err(|e| e.to_string())?;
-                    let verifier = derive_local_verifier(&*mk);
+                    let verifier = derive_local_verifier(&mk);
                     Ok::<_, String>((UnlockedVault::from_master_key(mk), verifier))
                 })
                 .await;
@@ -2842,7 +3032,7 @@ impl AppRoot {
                                 this.create = None;
                                 this.password.update(cx, |i, cx| i.clear(cx));
                                 this.show_pw = false;
-                                this.selected = 0;
+                                this.selected = None;
                                 this.filter = Filter::All;
                                 match this.reload_items() {
                                     Ok(()) => this.screen = Screen::List,
@@ -3245,6 +3435,12 @@ fn apply_clip_autoclear(this: &mut AppRoot, on: bool, cx: &mut Context<AppRoot>)
     this.save_config();
     cx.notify();
 }
+fn apply_pw_reveal(this: &mut AppRoot, idx: usize, cx: &mut Context<AppRoot>) {
+    this.touch();
+    this.pw_reveal_secs = [10, 20, 60, 0][idx];
+    this.save_config();
+    cx.notify();
+}
 fn apply_theme(this: &mut AppRoot, idx: usize, cx: &mut Context<AppRoot>) {
     this.touch();
     this.dark = idx == 1;
@@ -3329,6 +3525,17 @@ impl AppRoot {
             self.clip_autoclear,
             apply_clip_autoclear,
         );
+        let reveal_seg = seg_ctl(
+            t,
+            cx,
+            "seg-reveal",
+            &["10 秒", "20 秒", "1 分钟", "常亮"],
+            [10u64, 20, 60, 0]
+                .iter()
+                .position(|s| *s == self.pw_reveal_secs)
+                .unwrap_or(1),
+            apply_pw_reveal,
+        );
 
         let body = div()
             .id("settings-body")
@@ -3381,6 +3588,12 @@ impl AppRoot {
                 )
                 .child(set_row("复制密码 30 秒后自动清空", clip_switch, t))
                 .child(cap("关闭后，复制的密码将一直留在系统剪贴板。", t)),
+            )
+            // 密码明文显示时长
+            .child(
+                settings_card(t, "icons/eye.svg", t.sky_soft, t.sky, "密码显示")
+                    .child(set_row("点眼睛后明文自动隐藏", reveal_seg, t))
+                    .child(cap("选「常亮」则明文一直显示，需再点眼睛手动隐藏。", t)),
             )
             // 外观
             .child(

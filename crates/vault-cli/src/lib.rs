@@ -84,8 +84,10 @@ fn usage() -> String {
 
 // ================================================================ 参数与口令
 
+type Parsed = Result<(Vec<String>, Vec<(String, String)>), CliError>;
+
 /// 解析 `--key value` 旗标对与位置参数。
-fn parse_kv(args: &[String]) -> Result<(Vec<String>, Vec<(String, String)>), CliError> {
+fn parse_kv(args: &[String]) -> Parsed {
     let mut positional = Vec::new();
     let mut flags = Vec::new();
     let mut i = 0;
@@ -240,7 +242,7 @@ fn cmd_init(args: &[String]) -> Result<String, CliError> {
     let salt = generate_salt();
     let mk = derive_master_key(&password, &salt, params)
         .map_err(|e| CliError::Unlock(e.to_string()))?;
-    let verifier = derive_local_verifier(&*mk);
+    let verifier = derive_local_verifier(&mk);
 
     let store = NodbStore::open(&file).map_err(|e| CliError::Store(e.to_string()))?;
     store

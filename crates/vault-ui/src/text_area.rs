@@ -12,6 +12,8 @@ use gpui::{div, prelude::*, px, App, Bounds, Context, Div, FocusHandle, IntoElem
 use crate::field::{field_key, Field, FieldResult};
 use crate::WellStyle;
 
+type WindowCb = Box<dyn Fn(&mut Window, &mut App)>;
+
 /// 多行输入框（Entity 组件）。
 pub struct TextArea {
     pub(crate) field: Field,
@@ -23,7 +25,7 @@ pub struct TextArea {
     origin: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// 行高（font_size × 1.6，与渲染一致）。
     line_height: f32,
-    on_escape: Option<Box<dyn Fn(&mut Window, &mut App)>>,
+    on_escape: Option<WindowCb>,
 }
 
 impl TextArea {
@@ -99,9 +101,9 @@ impl TextArea {
         let text = self.field.as_str();
         let mut out = Vec::new();
         let mut start = 0usize; // char 下标
-        let mut chars = text.char_indices().peekable();
+        let chars = text.char_indices().peekable();
         let mut line_begin_byte = 0usize;
-        while let Some((byte, c)) = chars.next() {
+        for (byte, c) in chars {
             if c == '\n' {
                 out.push((start, &text[line_begin_byte..byte]));
                 start += 1; // 跳过换行符本身

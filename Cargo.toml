@@ -8,10 +8,15 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.5"
+version = "0.5.0"
 edition = "2021"
 
 [workspace.dependencies]
 vault-ui = { path = "crates/vault-ui" }
 # 内部 crate（版本随 workspace 走，改版本只改这一处）
 vault-core = { path = "crates/vault-core" }
+
+[workspace.lints.clippy]
+# 颜色字面量采用 0xRRGGBB_AA 拆分（RGB 位与 alpha 位分隔），是项目约定，
+# 不是错误分组；clippy 默认要求 4 位一组，这里按项目习惯放行。
+unusual_byte_groupings = "allow"

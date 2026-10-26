@@ -6,7 +6,9 @@
 #   scripts/make-app.sh --debug    # debug 构建（出包快，体积大）
 #
 # 产物双击即用 LaunchServices 拉起，不再经由终端。
-# 图标链路：assets/icon.svg --qlmanage--> 1024 PNG --sips--> iconset --iconutil--> icns。
+# 图标链路：assets/icon.png --sips--> 1024 PNG --sips--> iconset --iconutil--> icns。
+# 源 PNG 由设计稿（assets/icon.svg 同形态）导出；保留 alpha 通道。
+# （macOS 12 的 qlmanage 会把 SVG 合成到白底，故改读 PNG。）
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,17 +19,20 @@ fi
 
 BIN="target/$MODE/passpoart"
 APP="target/dist/Passpoart.app"
-ICON_SVG="crates/vault-app/assets/icon.svg"
+ICON_PNG="crates/vault-app/assets/icon.png"
 VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
 
 echo "==> cargo build ($MODE)"
-cargo build -p vault-app "--$MODE"
+if [[ "$MODE" == "release" ]]; then
+  cargo build -p vault-app --release
+else
+  cargo build -p vault-app
+fi
 
-echo "==> 渲染图标 1024px"
+echo "==> 准备 1024px 源 PNG"
 rm -rf target/dist /tmp/pp-icon.iconset /tmp/pp-icon-1024.png
 mkdir -p target/dist "$APP/Contents/MacOS" "$APP/Contents/Resources" /tmp/pp-icon.iconset
-qlmanage -t -s 1024 -o /tmp "$ICON_SVG" > /dev/null
-mv "/tmp/$(basename "$ICON_SVG").png" /tmp/pp-icon-1024.png
+sips -z 1024 1024 "$ICON_PNG" --out /tmp/pp-icon-1024.png > /dev/null
 
 echo "==> 烘焙软投影（Apple 模板风格：透明边距内，体底部微影）"
 python3 - /tmp/pp-icon-1024.png << 'PY'

@@ -14,6 +14,10 @@ use gpui::{div, prelude::*, px, App, Bounds, Context, Div, FocusHandle, IntoElem
 use crate::field::{field_key, ClipOp, Field, FieldResult};
 use crate::WellStyle;
 
+type WindowCb = Box<dyn Fn(&mut Window, &mut App)>;
+type Decorator =
+    Box<dyn Fn(&mut Context<TextInput>, &Field, &WellStyle) -> gpui::AnyElement>;
+
 /// 单行输入框（Entity 组件）。
 pub struct TextInput {
     /// 编辑缓冲（公开只读用 `text()`；改动走 `set_text`）。
@@ -27,18 +31,16 @@ pub struct TextInput {
     /// 井内文本原点（零尺寸 canvas 每帧记录；点击定位用）。
     origin: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Enter 回调（宿主编排：提交/保存/下一个）。
-    on_enter: Option<Box<dyn Fn(&mut Window, &mut App)>>,
+    on_enter: Option<WindowCb>,
     /// Tab 回调（默认聚焦失灵：宿主通常接「下一字段」）。
-    on_tab: Option<Box<dyn Fn(&mut Window, &mut App)>>,
+    on_tab: Option<WindowCb>,
     /// Esc 回调（默认收敛选区）。
-    on_escape: Option<Box<dyn Fn(&mut Window, &mut App)>>,
+    on_escape: Option<WindowCb>,
     /// 前置装饰工厂（每帧现造；参数带自家缓冲，**禁止在工厂里重读自身实体**——
     /// 渲染期间实体处于可变借用，Entity::read(self) 会 BorrowMut panic）。
-    leading:
-        Option<Box<dyn Fn(&mut Context<Self>, &Field, &WellStyle) -> gpui::AnyElement>>,
+    leading: Option<Decorator>,
     /// 后置装饰工厂（同上；参数含当前样式，主题切换即时生效）。
-    trailing:
-        Option<Box<dyn Fn(&mut Context<Self>, &Field, &WellStyle) -> gpui::AnyElement>>,
+    trailing: Option<Decorator>,
 }
 
 impl TextInput {
@@ -336,7 +338,6 @@ impl Render for TextInput {
                 match ks.key.as_str() {
                     "enter" => {
                         if let Some(f) = &this.on_enter {
-                            let f = f; // 借出回调
                             f(window, cx);
                         }
                     }

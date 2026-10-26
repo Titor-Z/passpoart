@@ -8,6 +8,9 @@ description = "Passpoart 核心库：模型、加密、存储、同步抽象。�
 name = "vault_core"
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 # 加密四件套（计划书第 5 节选型，全部 RustCrypto 系、经过审计）：
 # KDF：Argon2id（抗 GPU/ASIC）

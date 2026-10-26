@@ -7,6 +7,9 @@ description = "Passpoart 自维护的 gpui-ce 输入组件库（gpui-ce 不公�
 [lib]
 name = "vault_ui"
 
+[lints]
+workspace = true
+
 [dependencies]
 # 与 vault-app 同款 UI 层；font-kit 必须开（否则一个字都不显示）。
 gpui = { package = "gpui-ce", version = "0.2.2" }

@@ -8,6 +8,9 @@ description = "Passpoart 桌面壳：gpui-ce 420×640 玻璃小窗（UI 层唯�
 name = "passpoart"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 # —— UI 层：gpui-ce（与 ~/rili、~/glowlink 同款技术栈）——
 # `font-kit` 必须开：不开的话窗口、布局、色块都正常，但一个字都不显示。

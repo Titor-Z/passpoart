@@ -165,7 +165,7 @@ impl VaultMeta {
     pub fn unlock(&self, password: &str) -> Result<UnlockedVault, UnlockError> {
         let mk = crate::keymgr::derive_master_key(password, &self.kdf_salt, self.kdf_params)
             .map_err(UnlockError::Kdf)?;
-        if crate::keymgr::derive_local_verifier(&*mk) != self.verifier {
+        if crate::keymgr::derive_local_verifier(&mk) != self.verifier {
             return Err(UnlockError::BadPassword);
         }
         Ok(UnlockedVault::from_master_key(mk))

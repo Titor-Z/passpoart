@@ -48,7 +48,7 @@ mod tests {
     fn password_shape() {
         for len in [8usize, 16, 24, 64, 100] {
             let pw = generate_password(len);
-            assert_eq!(pw.len(), len.min(64).max(8));
+            assert_eq!(pw.len(), len.clamp(8, 64));
             assert!(pw.chars().any(|c| c.is_ascii_lowercase()));
             assert!(pw.chars().any(|c| c.is_ascii_uppercase()));
             assert!(pw.chars().any(|c| c.is_ascii_digit()));

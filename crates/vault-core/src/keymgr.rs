@@ -137,13 +137,13 @@ impl UnlockedVault {
     /// 已持有 MK 时直接构造（校验器比对通过后的路径，避免二次 Argon2id）。
     pub fn from_master_key(master_key: Zeroizing<[u8; 32]>) -> Self {
         Self {
-            vault_key: derive_vault_key(&*master_key),
+            vault_key: derive_vault_key(&master_key),
         }
     }
 
     /// 加密一条条目正文（AAD 传条目 id，防跨条目挪用）。
     pub fn seal_item(&self, plaintext: &[u8], item_id: &[u8]) -> Result<Envelope, CryptoError> {
-        seal_envelope(&*self.vault_key, plaintext, item_id)
+        seal_envelope(&self.vault_key, plaintext, item_id)
     }
 
     /// 解密一条条目正文；认证失败即 Err。
@@ -152,7 +152,7 @@ impl UnlockedVault {
         envelope: &Envelope,
         item_id: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        open_envelope(&*self.vault_key, envelope, item_id)
+        open_envelope(&self.vault_key, envelope, item_id)
     }
 
     /// 主动锁定：消耗自身并清零 VK（drop 兜底之外的第二道保险）。
@@ -225,9 +225,9 @@ mod tests {
     /// 校验器确定性：同口令同 salt 同参数 ⇒ 同 verifier；口令变 ⇒ verifier 变。
     #[test]
     fn local_verifier_deterministic() {
-        let a = derive_local_verifier(&*derive_master_key("pw", &[1u8; SALT_LEN], weak_params()).unwrap());
-        let b = derive_local_verifier(&*derive_master_key("pw", &[1u8; SALT_LEN], weak_params()).unwrap());
-        let c = derive_local_verifier(&*derive_master_key("pw2", &[1u8; SALT_LEN], weak_params()).unwrap());
+        let a = derive_local_verifier(&derive_master_key("pw", &[1u8; SALT_LEN], weak_params()).unwrap());
+        let b = derive_local_verifier(&derive_master_key("pw", &[1u8; SALT_LEN], weak_params()).unwrap());
+        let c = derive_local_verifier(&derive_master_key("pw2", &[1u8; SALT_LEN], weak_params()).unwrap());
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 64);
@@ -237,8 +237,8 @@ mod tests {
     #[test]
     fn vault_and_auth_keys_domain_separated() {
         let mk = derive_master_key("pw", &[1u8; SALT_LEN], weak_params()).unwrap();
-        let vk = derive_vault_key(&*mk);
-        let ak = derive_auth_key(&*mk);
+        let vk = derive_vault_key(&mk);
+        let ak = derive_auth_key(&mk);
         assert_ne!(*vk, *ak);
     }
 
